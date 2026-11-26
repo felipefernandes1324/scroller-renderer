@@ -1,7 +1,7 @@
 # scroller-renderer
 
-CLI headless em Go para renderizar gameplay de osu!mania a partir de um beatmap
-`.osu`, replay `.osr` (ou auto-play) e skin opcional. O renderizador usa buffers
+CLI headless em Go para renderizar replay de osu!mania a partir de beatmaps
+`.osu`, replay `.osr` (ou auto-play) e skin. O renderizador usa buffers
 RGBA em software, faz supersampling temporal para motion blur, mistura o áudio
 PCM/hitsounds e entrega vídeo H.264/AAC ao FFmpeg.
 
