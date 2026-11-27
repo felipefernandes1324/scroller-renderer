@@ -36,6 +36,13 @@ type Result struct {
 	HPAfter       float64
 }
 
+type AccuracyEvent struct {
+	Time          float64
+	HitError      float64
+	Grade         Grade
+	AccuracyAfter float64
+}
+
 type TimingWindows struct {
 	W320 float64
 	W300 float64
@@ -63,10 +70,11 @@ func Windows(od float64) TimingWindows {
 }
 
 type Stats struct {
-	Combo    int
-	MaxCombo int
-	Accuracy float64
-	Results  []Result
+	Combo          int
+	MaxCombo       int
+	Accuracy       float64
+	Results        []Result
+	AccuracyEvents []AccuracyEvent
 }
 
 type keyEvent struct {
@@ -110,7 +118,7 @@ func Simulate(objects []beatmap.HitObject, replayEvents []replay.Event, od float
 
 	stats := Stats{}
 	total, maxPoints := 0.0, float64(len(sortedObjects))*320
-	totalAccuracy, maxAccuracyPoints := 0.0, float64(len(sortedObjects))*300
+	totalAccuracy := 0.0
 	hp := 1.0
 	cursors := make(map[int]int)
 	for objectIndex, object := range sortedObjects {
@@ -151,25 +159,22 @@ func Simulate(objects []beatmap.HitObject, replayEvents []replay.Event, od float
 			case bestDelta <= w50:
 				grade = Hit50
 			}
-			if object.Long && grade != Miss {
-				released := false
-				releaseStart := sort.Search(len(keys), func(i int) bool { return keys[i].time >= object.End-w50 })
-				for i := releaseStart; i < len(keys) && keys[i].time <= object.End+missWindow; i++ {
-					if !keys[i].down {
-						released = true
-						releaseTime = keys[i].time
-						break
-					}
-				}
-				if !released {
-					grade = Miss
-					releaseTime = object.End
+		}
+		if object.Long && grade != Miss {
+			releaseStart := sort.Search(len(keys), func(i int) bool { return keys[i].time >= object.End-w50 })
+			for i := releaseStart; i < len(keys) && keys[i].time <= object.End+missWindow; i++ {
+				if !keys[i].down {
+					releaseTime = keys[i].time
+					break
 				}
 			}
 		}
 		value := gradeValue(grade)
 		total += value
 		totalAccuracy += accuracyValue(grade)
+		stats.AccuracyEvents = append(stats.AccuracyEvents, AccuracyEvent{
+			Time: hitTime, HitError: hitError, Grade: grade,
+		})
 		if grade == Miss {
 			stats.Combo = 0
 			hp = math.Max(0.05, hp-0.08)
@@ -184,6 +189,17 @@ func Simulate(objects []beatmap.HitObject, replayEvents []replay.Event, od float
 		if maxPoints > 0 {
 			scoreAfter = int(math.Round(total / maxPoints * 1000000))
 		}
+		if object.Long {
+			tailStart := cursor
+			if best >= 0 {
+				tailStart = best
+			}
+			tailGrade, tailTime, tailError := simulateHoldTail(keys, tailStart, object, grade, win)
+			totalAccuracy += accuracyValue(tailGrade)
+			stats.AccuracyEvents = append(stats.AccuracyEvents, AccuracyEvent{
+				Time: tailTime, HitError: tailError, Grade: tailGrade,
+			})
+		}
 		stats.Results = append(stats.Results, Result{
 			Time: object.Time, EndTime: object.End, HitTime: hitTime, ReleaseTime: releaseTime,
 			HitError: hitError, Lane: object.Lane, Grade: grade, Long: object.Long,
@@ -192,10 +208,75 @@ func Simulate(objects []beatmap.HitObject, replayEvents []replay.Event, od float
 			ScoreAfter:    scoreAfter, HPAfter: hp,
 		})
 	}
-	if maxAccuracyPoints > 0 {
-		stats.Accuracy = totalAccuracy / maxAccuracyPoints * 100
+	sort.SliceStable(stats.AccuracyEvents, func(i, j int) bool {
+		return stats.AccuracyEvents[i].Time < stats.AccuracyEvents[j].Time
+	})
+	if len(stats.AccuracyEvents) > 0 {
+		var earned float64
+		for i := range stats.AccuracyEvents {
+			earned += accuracyValue(stats.AccuracyEvents[i].Grade)
+			stats.AccuracyEvents[i].AccuracyAfter = earned / (float64(i+1) * 300) * 100
+		}
+		stats.Accuracy = totalAccuracy / (float64(len(stats.AccuracyEvents)) * 300) * 100
 	}
 	return stats
+}
+
+func simulateHoldTail(keys []keyEvent, start int, object beatmap.HitObject, headGrade Grade, windows TimingWindows) (Grade, float64, float64) {
+	const releaseWindowLenience = 1.5
+	deadline := object.End + windows.Miss*releaseWindowLenience
+	holding := false
+	bodyBroken := false
+	startTime := object.Time - windows.Miss
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < len(keys); i++ {
+		event := keys[i]
+		if event.time < startTime {
+			continue
+		}
+		if event.time > deadline {
+			break
+		}
+		if event.down {
+			holding = true
+			continue
+		}
+		if !holding {
+			continue
+		}
+		holding = false
+		offset := (event.time - object.End) / releaseWindowLenience
+		if math.Abs(offset) > windows.Miss {
+			bodyBroken = true
+			continue
+		}
+		grade := gradeForOffset(offset, windows)
+		if (headGrade == Miss || bodyBroken) && grade != Miss {
+			grade = Hit50
+		}
+		return grade, event.time, event.time - object.End
+	}
+	return Miss, deadline, 0
+}
+
+func gradeForOffset(offset float64, windows TimingWindows) Grade {
+	delta := math.Abs(offset)
+	switch {
+	case delta <= windows.W320:
+		return MAX
+	case delta <= windows.W300:
+		return Hit300
+	case delta <= windows.W200:
+		return Hit200
+	case delta <= windows.W100:
+		return Hit100
+	case delta <= windows.W50:
+		return Hit50
+	default:
+		return Miss
+	}
 }
 
 func ApplyReplaySummary(stats *Stats, summary replay.ScoreSummary) {
@@ -203,6 +284,16 @@ func ApplyReplaySummary(stats *Stats, summary replay.ScoreSummary) {
 	stats.MaxCombo = summary.MaxCombo
 	if len(stats.Results) == 0 {
 		return
+	}
+	if len(stats.AccuracyEvents) > 0 {
+		lastAccuracy := stats.AccuracyEvents[len(stats.AccuracyEvents)-1].AccuracyAfter
+		correction := stats.Accuracy - lastAccuracy
+		eventCount := float64(len(stats.AccuracyEvents))
+		for i := range stats.AccuracyEvents {
+			progress := float64(i+1) / eventCount
+			stats.AccuracyEvents[i].AccuracyAfter += correction * progress
+		}
+		stats.AccuracyEvents[len(stats.AccuracyEvents)-1].AccuracyAfter = stats.Accuracy
 	}
 	last := &stats.Results[len(stats.Results)-1]
 	simulatedScore := last.ScoreAfter

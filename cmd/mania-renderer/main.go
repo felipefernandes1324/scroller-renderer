@@ -102,6 +102,11 @@ func runWithProgress(osuPath, osrPath, skinPath, output string, fps float64, mot
 			maxTime = event.Time
 		}
 	}
+	for _, event := range stats.AccuracyEvents {
+		if event.Time > maxTime {
+			maxTime = event.Time
+		}
+	}
 	wav, err := os.CreateTemp("", "mania-render-*.wav")
 	if err != nil {
 		return err

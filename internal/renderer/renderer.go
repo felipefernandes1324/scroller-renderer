@@ -602,7 +602,7 @@ func (r *Renderer) drawHUD(img *image.RGBA, timeMS float64) {
 	progress := math.Min(1, math.Max(0, timeMS/duration))
 
 	// Top-center song progress pie clock + Accuracy (matching the reference screenshot).
-	acc, combo, score, hp := statsAt(r.Stats.Results, timeMS)
+	acc, combo, score, hp := statsAt(r.Stats.Results, r.Stats.AccuracyEvents, timeMS)
 	r.drawStatsPanel(img, timeMS, acc)
 	r.drawMapInfoPanel(img, timeMS)
 	stageCenterX := (r.stageLeft + r.stageRight) / 2
@@ -1412,24 +1412,45 @@ func keyMaskAt(events []replay.Event, time float64) uint32 {
 	return events[index-1].Mask
 }
 
-func statsAt(results []judge.Result, time float64) (acc float64, combo, score int, hp float64) {
+func statsAt(results []judge.Result, accuracyEvents []judge.AccuracyEvent, time float64) (acc float64, combo, score int, hp float64) {
+	acc = accuracyAt(accuracyEvents, time)
 	end := sort.Search(len(results), func(i int) bool { return results[i].Time > time })
 	if end == 0 {
-		return 100.0, 0, 0, 1.0
+		return acc, 0, 0, 1.0
 	}
 	r := results[end-1]
-	acc, combo, score, hp = r.AccuracyAfter, r.ComboAfter, r.ScoreAfter, r.HPAfter
+	combo, score, hp = r.ComboAfter, r.ScoreAfter, r.HPAfter
 	if end < len(results) {
 		next := results[end]
 		span := next.Time - r.Time
 		if span > 0 {
 			progress := math.Max(0, math.Min(1, (time-r.Time)/span))
-			acc += (next.AccuracyAfter - acc) * progress
 			score = int(math.Round(float64(score) + float64(next.ScoreAfter-score)*progress))
 			hp += (next.HPAfter - hp) * progress
 		}
 	}
 	return acc, combo, score, hp
+}
+
+func accuracyAt(events []judge.AccuracyEvent, time float64) float64 {
+	if len(events) == 0 {
+		return 100
+	}
+	end := sort.Search(len(events), func(i int) bool { return events[i].Time > time })
+	if end == 0 {
+		return 100
+	}
+	current := events[end-1]
+	if end == len(events) {
+		return current.AccuracyAfter
+	}
+	next := events[end]
+	span := next.Time - current.Time
+	if span <= 0 {
+		return current.AccuracyAfter
+	}
+	progress := math.Max(0, math.Min(1, (time-current.Time)/span))
+	return current.AccuracyAfter + (next.AccuracyAfter-current.AccuracyAfter)*progress
 }
 
 func latestResultIndex(results []judge.Result, time float64) (int, bool) {
