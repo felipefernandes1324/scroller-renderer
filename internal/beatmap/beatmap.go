@@ -37,6 +37,8 @@ type Map struct {
 	Mode          int
 	Keys          int
 	OD            float64
+	HP            float64
+	StarRating    float64
 	Objects       []HitObject
 	TimingPoints  []TimingPoint
 }
@@ -48,7 +50,7 @@ func Parse(path string) (*Map, error) {
 	}
 	defer file.Close()
 
-	m := &Map{Path: path, Keys: 4, OD: 5}
+	m := &Map{Path: path, Keys: 4, OD: 5, HP: 5}
 	section := ""
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 4096), 4*1024*1024)
@@ -119,6 +121,8 @@ func Parse(path string) (*Map, error) {
 				m.Keys = int(n + 0.5)
 			case "OverallDifficulty":
 				m.OD = n
+			case "HPDrainRate":
+				m.HP = n
 			}
 		case "TimingPoints":
 			fields := strings.Split(line, ",")

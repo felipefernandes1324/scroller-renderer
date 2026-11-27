@@ -71,6 +71,33 @@ type ParsedReplay struct {
 	Summary ScoreSummary
 }
 
+func BeatmapHash(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	r := bytes.NewReader(data)
+	mode, err := r.ReadByte()
+	if err != nil {
+		return "", fmt.Errorf("read replay mode: %w", err)
+	}
+	if mode != 3 {
+		return "", fmt.Errorf("replay mode is %d; expected mania (3)", mode)
+	}
+	var version int32
+	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
+		return "", fmt.Errorf("read replay header: %w", err)
+	}
+	hash, err := readString(r)
+	if err != nil {
+		return "", fmt.Errorf("read replay beatmap hash: %w", err)
+	}
+	if hash == "" {
+		return "", fmt.Errorf("replay does not contain a beatmap hash")
+	}
+	return hash, nil
+}
+
 func ParseReplay(path string, keys int) (ParsedReplay, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -126,6 +153,9 @@ func ParseReplay(path string, keys int) (ParsedReplay, error) {
 	_ = timestamp
 	if compressedLength < 0 || int64(compressedLength) > int64(r.Len()) {
 		return ParsedReplay{}, fmt.Errorf("invalid replay compressed length %d", compressedLength)
+	}
+	if compressedLength == 0 {
+		return ParsedReplay{}, fmt.Errorf("o arquivo .osr não contém dados de jogadas; exporte novamente um replay completo no osu!")
 	}
 	compressed := make([]byte, compressedLength)
 	if _, err := io.ReadFull(r, compressed); err != nil {

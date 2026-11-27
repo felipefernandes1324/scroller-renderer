@@ -17,7 +17,10 @@ const (
 	channels   = 2
 )
 
-func Mix(audioPath, skinDir, mapDir, outPath string, results []judge.Result, minimumDuration float64) (float64, error) {
+func Mix(audioPath, skinDir, mapDir, outPath string, results []judge.Result, minimumDuration, musicVolume, hitsoundVolume float64) (float64, error) {
+	if musicVolume < 0 || musicVolume > 100 || hitsoundVolume < 0 || hitsoundVolume > 100 {
+		return 0, fmt.Errorf("audio volumes must be between 0 and 100")
+	}
 	var pcm []int16
 	if audioPath != "" {
 		if _, err := os.Stat(audioPath); err != nil {
@@ -29,6 +32,7 @@ func Mix(audioPath, skinDir, mapDir, outPath string, results []judge.Result, min
 		}
 		pcm = decoded
 	}
+	scaleVolume(pcm, musicVolume/100)
 	minimumSamples := int(math.Ceil(minimumDuration*sampleRate)) * channels
 	if minimumSamples > len(pcm) {
 		pcm = append(pcm, make([]int16, minimumSamples-len(pcm))...)
@@ -70,7 +74,7 @@ func Mix(audioPath, skinDir, mapDir, outPath string, results []judge.Result, min
 						sample = fallbackHit()
 						samples["<fallback>"] = sample
 					}
-					mix(pcm, sample, start)
+					mix(pcm, sample, start, hitsoundVolume/100)
 					primaryPlayed = true
 				}
 				continue
@@ -84,7 +88,7 @@ func Mix(audioPath, skinDir, mapDir, outPath string, results []judge.Result, min
 				sample = decoded
 				samples[path] = sample
 			}
-			mix(pcm, sample, start)
+			mix(pcm, sample, start, hitsoundVolume/100)
 			if i == 0 {
 				primaryPlayed = true
 			}
@@ -95,7 +99,7 @@ func Mix(audioPath, skinDir, mapDir, outPath string, results []judge.Result, min
 				fallback = fallbackHit()
 				samples["<fallback>"] = fallback
 			}
-			mix(pcm, fallback, start)
+			mix(pcm, fallback, start, hitsoundVolume/100)
 		}
 	}
 	if err := writeWAV(outPath, pcm); err != nil {
@@ -157,7 +161,13 @@ func fallbackHit() []int16 {
 	return pcm
 }
 
-func mix(dst, src []int16, start int) {
+func scaleVolume(samples []int16, volume float64) {
+	for i, sample := range samples {
+		samples[i] = int16(math.Round(float64(sample) * volume))
+	}
+}
+
+func mix(dst, src []int16, start int, volume float64) {
 	if start < 0 {
 		src = src[-start:]
 		start = 0
@@ -170,7 +180,7 @@ func mix(dst, src []int16, start int) {
 		end = len(dst)
 	}
 	for i := start; i < end; i++ {
-		value := int32(dst[i]) + int32(src[i-start])
+		value := int32(dst[i]) + int32(math.Round(float64(src[i-start])*volume))
 		if value > 32767 {
 			value = 32767
 		} else if value < -32768 {

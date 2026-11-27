@@ -53,9 +53,8 @@ type Renderer struct {
 	stageLight     *image.NRGBA
 	stageHint      *image.NRGBA
 	stageBottom    *image.NRGBA
-	lightingN      *image.NRGBA
-	lightingL      *image.NRGBA
-	burstGlow      *image.NRGBA
+	lightingN      []*image.NRGBA
+	lightingL      []*image.NRGBA
 	scoreGlyphs    map[rune]*image.NRGBA
 	comboGlyphs    map[rune]*image.NRGBA
 	notes          []noteVisual
@@ -65,6 +64,7 @@ type Renderer struct {
 	judgeFace      font.Face
 	metaFace       font.Face
 	windows        judge.TimingWindows
+	gradeStats     []gradeSnapshot
 }
 
 type noteVisual struct {
@@ -72,6 +72,12 @@ type noteVisual struct {
 	startPosition float64
 	endPosition   float64
 	resultIndex   int
+}
+
+type gradeSnapshot struct {
+	max, perfect, great, good, bad, miss int
+	hitCount                             int
+	hitErrorSum, hitErrorSquareSum       float64
 }
 
 func (r *Renderer) Frame(timeMS float64) *image.RGBA {
@@ -90,6 +96,7 @@ func (r *Renderer) FrameInto(timeMS float64, img *image.RGBA) {
 			r.drawColumnLight(img, lane)
 		}
 	}
+	r.drawHitEffects(img, timeMS)
 
 	// Receptors underneath active notes (matches osu!mania classic circle skin layering).
 	for lane := 0; lane < r.Map.Keys; lane++ {
@@ -144,13 +151,11 @@ func (r *Renderer) FrameInto(timeMS float64, img *image.RGBA) {
 
 			bodyTop := int(math.Round(math.Min(y, endY)))
 			bodyBottom := int(math.Round(math.Max(y, endY)))
-			if held && bodyBottom > r.receptorY {
-				bodyBottom = r.receptorY
-			}
 			if body != nil && bodyBottom > bodyTop {
-				blitStretchedY(img, body, cx-body.Bounds().Dx()/2, bodyTop, bodyBottom-bodyTop, alpha)
+				noteW := noteSpriteWidth(r.laneWidths[lane])
+				blitLongBody(img, body, cx-noteW/2, bodyTop, noteW, bodyBottom-bodyTop, alpha)
 			}
-			if tail != nil && endY < float64(r.receptorY)+float64(tail.Bounds().Dy()) {
+			if tail != nil {
 				blitNRGBA(img, tail, cx-tail.Bounds().Dx()/2, int(math.Round(endY))-tail.Bounds().Dy()/2, alpha)
 			}
 			if head != nil && (held || y < float64(r.Height)+float64(head.Bounds().Dy())) {
@@ -181,7 +186,6 @@ func (r *Renderer) FrameInto(timeMS float64, img *image.RGBA) {
 		}
 	}
 
-	r.drawHitEffects(img, timeMS)
 	r.drawHUD(img, timeMS)
 }
 
@@ -195,6 +199,40 @@ func (r *Renderer) prepare() {
 		r.scale = 0.5
 	}
 	r.windows = judge.Windows(r.Map.OD)
+	r.gradeStats = make([]gradeSnapshot, len(r.Stats.Results)+1)
+	for i, result := range r.Stats.Results {
+		current := r.gradeStats[i+1]
+		switch result.Grade {
+		case judge.MAX:
+			current.max++
+		case judge.Hit300:
+			current.perfect++
+		case judge.Hit200:
+			current.great++
+		case judge.Hit100:
+			current.good++
+		case judge.Hit50:
+			current.bad++
+		default:
+			current.miss++
+		}
+		if result.Grade != judge.Miss {
+			current.hitCount++
+			current.hitErrorSum += result.HitError
+			current.hitErrorSquareSum += result.HitError * result.HitError
+		}
+		previous := r.gradeStats[i]
+		current.max += previous.max
+		current.perfect += previous.perfect
+		current.great += previous.great
+		current.good += previous.good
+		current.bad += previous.bad
+		current.miss += previous.miss
+		current.hitCount += previous.hitCount
+		current.hitErrorSum += previous.hitErrorSum
+		current.hitErrorSquareSum += previous.hitErrorSquareSum
+		r.gradeStats[i+1] = current
+	}
 
 	keys := r.Map.Keys
 	r.laneWidths = make([]int, keys)
@@ -280,7 +318,7 @@ func (r *Renderer) buildBackdrop() {
 
 	// Clean outer stage borders (skin sprites if available, otherwise crisp light lines).
 	borderW := int(math.Max(2, math.Round(2.2*r.scale)))
-	if leftImg := r.Skin.Image(r.Skin.Mania.StageLeft); leftImg != nil {
+	if leftImg := r.Skin.Image(r.Skin.Mania.StageLeft); usableSkinSprite(leftImg) {
 		targetW := int(math.Round(float64(leftImg.Bounds().Dx()) * r.scale * 0.6))
 		if targetW < borderW {
 			targetW = borderW
@@ -290,7 +328,7 @@ func (r *Renderer) buildBackdrop() {
 	} else {
 		fillAlpha(bgImg, r.stageLeft-borderW, 0, r.stageLeft, r.Height, color.NRGBA{R: 205, G: 212, B: 224, A: 245})
 	}
-	if rightImg := r.Skin.Image(r.Skin.Mania.StageRight); rightImg != nil {
+	if rightImg := r.Skin.Image(r.Skin.Mania.StageRight); usableSkinSprite(rightImg) {
 		targetW := int(math.Round(float64(rightImg.Bounds().Dx()) * r.scale * 0.6))
 		if targetW < borderW {
 			targetW = borderW
@@ -301,12 +339,12 @@ func (r *Renderer) buildBackdrop() {
 		fillAlpha(bgImg, r.stageRight, 0, r.stageRight+borderW, r.Height, color.NRGBA{R: 205, G: 212, B: 224, A: 245})
 	}
 
-	if src := r.Skin.Image(r.Skin.Mania.StageHint); src != nil {
+	if src := r.Skin.Image(r.Skin.Mania.StageHint); usableSkinSprite(src) {
 		h := scaledHeight(src, r.stageWidth)
 		r.stageHint = scaleNRGBA(src, r.stageWidth, h)
 		blitNRGBA(bgImg, r.stageHint, r.stageLeft, r.receptorY-r.stageHint.Bounds().Dy()/2, 1)
 	}
-	if src := r.Skin.Image(r.Skin.Mania.StageBottom); src != nil {
+	if src := r.Skin.Image(r.Skin.Mania.StageBottom); usableSkinSprite(src) {
 		w := int(math.Round(float64(src.Bounds().Dx()) * r.scale))
 		h := int(math.Round(float64(src.Bounds().Dy()) * r.scale))
 		r.stageBottom = scaleNRGBA(src, w, h)
@@ -327,10 +365,7 @@ func (r *Renderer) prepareSprites() {
 
 	for i := 0; i < keys; i++ {
 		colW := r.laneWidths[i]
-		noteW := int(math.Round(float64(colW) * 0.92))
-		if noteW < 8 {
-			noteW = 8
-		}
+		noteW := noteSpriteWidth(colW)
 		if src := r.Skin.NoteSprite(i); src != nil {
 			h := scaledHeight(src, noteW)
 			r.noteSprites[i] = scaleNRGBA(src, noteW, h)
@@ -340,7 +375,7 @@ func (r *Renderer) prepareSprites() {
 			r.headSprites[i] = scaleNRGBA(src, noteW, h)
 		}
 		if src := r.Skin.LongBodySprite(i); src != nil {
-			r.bodySprites[i] = scaleNRGBA(src, noteW, 16)
+			r.bodySprites[i] = src
 		}
 		if src := r.Skin.LongTailSprite(i); src != nil {
 			h := scaledHeight(src, noteW)
@@ -361,29 +396,58 @@ func (r *Renderer) prepareSprites() {
 	r.hitSprites = make(map[judge.Grade]*image.NRGBA)
 	for _, g := range []judge.Grade{judge.MAX, judge.Hit300, judge.Hit200, judge.Hit100, judge.Hit50, judge.Miss} {
 		if src := r.Skin.HitSprite(string(g)); src != nil {
-			targetW := int(math.Min(float64(r.stageWidth)*0.65, 160*r.scale))
-			if targetW < 40 {
-				targetW = 40
-			}
-			r.hitSprites[g] = scaleNRGBA(src, targetW, scaledHeight(src, targetW))
+			r.hitSprites[g] = scaleJudgmentSprite(src, r.scale)
 		}
 	}
 
-	if src := r.Skin.Image(r.Skin.Mania.StageLight); src != nil {
-		avgW := r.stageWidth / keys
-		r.stageLight = scaleNRGBA(src, avgW, int(210*r.scale))
+	if src := r.Skin.Image(r.Skin.Mania.StageLight); usableSkinSprite(src) {
+		width := maxInt(1, int(math.Round(float64(src.Bounds().Dx())*r.scale)))
+		height := maxInt(1, int(math.Round(float64(src.Bounds().Dy())*r.scale)))
+		r.stageLight = scaleNRGBA(src, width, height)
 	}
-	if src := r.Skin.Image(r.Skin.Mania.LightingN); src != nil {
-		sz := int(math.Round(float64(r.stageWidth/keys) * 2.4))
-		r.lightingN = scaleNRGBA(src, sz, scaledHeight(src, sz))
-	}
-	if src := r.Skin.Image(r.Skin.Mania.LightingL); src != nil {
-		sz := int(math.Round(float64(r.stageWidth/keys) * 2.4))
-		r.lightingL = scaleNRGBA(src, sz, scaledHeight(src, sz))
-	}
+	avgW := r.stageWidth / keys
+	lightWidth := int(math.Round(float64(avgW) * 1.4))
+	r.lightingN = r.prepareLightingFrames(r.Skin.Mania.LightingN, lightWidth)
+	r.lightingL = r.prepareLightingFrames(r.Skin.Mania.LightingL, lightWidth)
 	r.scoreGlyphs = prepareNumberGlyphs(r.Skin, r.Skin.ScorePrefix, int(math.Max(10, 20*r.scale)))
 	r.comboGlyphs = prepareNumberGlyphs(r.Skin, r.Skin.ComboPrefix, int(math.Max(10, 28*r.scale)))
-	r.burstGlow = generateBurstGlow(int(math.Round(float64(r.stageWidth/keys) * 2.8)))
+}
+
+func (r *Renderer) prepareLightingFrames(prefix string, targetWidth int) []*image.NRGBA {
+	sources := r.Skin.AnimationFrames(prefix)
+	if len(sources) == 0 {
+		if src := r.Skin.Image(prefix); usableSkinSprite(src) {
+			sources = append(sources, src)
+		}
+	}
+	frames := make([]*image.NRGBA, 0, len(sources))
+	for _, src := range sources {
+		if !usableSkinSprite(src) {
+			continue
+		}
+		frames = append(frames, scaleNRGBA(src, targetWidth, scaledHeight(src, targetWidth)))
+	}
+	return frames
+}
+
+func scaleJudgmentSprite(src *image.NRGBA, scale float64) *image.NRGBA {
+	targetHeight := maxInt(12, int(math.Round(24*scale)))
+	sourceWidth := maxInt(1, src.Bounds().Dx())
+	sourceHeight := maxInt(1, src.Bounds().Dy())
+	targetWidth := maxInt(1, int(math.Round(float64(sourceWidth)*float64(targetHeight)/float64(sourceHeight))))
+	return scaleNRGBA(src, targetWidth, targetHeight)
+}
+
+func usableSkinSprite(src *image.NRGBA) bool {
+	return src != nil && src.Bounds().Dx() > 4 && src.Bounds().Dy() > 4
+}
+
+func noteSpriteWidth(columnWidth int) int {
+	width := int(math.Round(float64(columnWidth) * 0.92))
+	if width < 8 {
+		return 8
+	}
+	return width
 }
 
 func (r *Renderer) prepareFonts() {
@@ -450,51 +514,34 @@ func (r *Renderer) prepareNotes() {
 }
 
 func (r *Renderer) drawColumnLight(img *image.RGBA, lane int) {
-	x0 := r.laneLefts[lane]
-	w := r.laneWidths[lane]
-	lightY := int(math.Round(r.Skin.Mania.LightPosition * r.scale))
-	if r.stageLight != nil {
-		blitAdditive(img, r.stageLight, x0, lightY-r.stageLight.Bounds().Dy()/2, 0.55)
+	if r.stageLight == nil {
 		return
 	}
-	topY := r.receptorY - int(185*r.scale)
-	if topY < 0 {
-		topY = 0
-	}
-	botY := r.receptorY + int(10*r.scale)
-	if botY > r.Height {
-		botY = r.Height
-	}
-	span := float64(botY - topY)
-	if span <= 1 {
-		return
-	}
-	c := r.Skin.LaneColors[lane]
-	for y := topY; y < botY; y++ {
-		t := float64(y-topY) / span
-		if y > r.receptorY {
-			t = 1.0 - float64(y-r.receptorY)/math.Max(1, 10*r.scale)
-		}
-		intensity := t * t * 0.28
-		addR := uint32(float64(c.R)*intensity + 45*intensity)
-		addG := uint32(float64(c.G)*intensity + 55*intensity)
-		addB := uint32(float64(c.B)*intensity + 70*intensity)
-		row := y * img.Stride
-		for x := x0; x < x0+w; x++ {
-			if x < 0 || x >= r.Width {
-				continue
-			}
-			idx := row + x*4
-			img.Pix[idx] = addClamp(img.Pix[idx], addR)
-			img.Pix[idx+1] = addClamp(img.Pix[idx+1], addG)
-			img.Pix[idx+2] = addClamp(img.Pix[idx+2], addB)
-		}
-	}
+	x := r.laneLefts[lane] + (r.laneWidths[lane]-r.stageLight.Bounds().Dx())/2
+	y := int(math.Round(r.Skin.Mania.LightPosition*r.scale)) - r.stageLight.Bounds().Dy()/2
+	blitNRGBA(img, r.stageLight, x, y, 1)
 }
 
 func (r *Renderer) drawHitEffects(img *image.RGBA, timeMS float64) {
-	const burstDuration = 220.0
-	start := sort.Search(len(r.Stats.Results), func(i int) bool { return r.Stats.Results[i].Time >= timeMS-burstDuration-200 })
+	for _, res := range r.Stats.Results {
+		if !res.Long || res.Grade == judge.Miss || timeMS < res.HitTime || timeMS > res.ReleaseTime {
+			continue
+		}
+		lighting := r.animationFrame(r.lightingL, timeMS-res.HitTime, true)
+		if lighting == nil {
+			continue
+		}
+		cx := r.laneLefts[res.Lane] + r.laneWidths[res.Lane]/2
+		blitNRGBA(img, lighting, cx-lighting.Bounds().Dx()/2, r.receptorY-lighting.Bounds().Dy()/2, 1)
+	}
+
+	if len(r.lightingN) == 0 {
+		return
+	}
+	burstDuration := math.Max(220, float64(len(r.lightingN))*1000/r.animationFrameRate())
+	start := sort.Search(len(r.Stats.Results), func(i int) bool {
+		return r.Stats.Results[i].Time >= timeMS-burstDuration-200
+	})
 	for i := start; i < len(r.Stats.Results); i++ {
 		res := r.Stats.Results[i]
 		if res.Time > timeMS+200 {
@@ -503,94 +550,40 @@ func (r *Renderer) drawHitEffects(img *image.RGBA, timeMS float64) {
 		if res.Grade == judge.Miss {
 			continue
 		}
-
-		cx := r.laneLefts[res.Lane] + r.laneWidths[res.Lane]/2
-		cy := r.receptorY
-
-		// Continuous glow while holding a Long Note.
-		if res.Long && timeMS >= res.HitTime && timeMS <= res.ReleaseTime {
-			pulse := 0.72 + 0.18*math.Sin(timeMS*0.035)
-			lighting := r.lightingL
-			if lighting == nil {
-				lighting = r.lightingN
-			}
-			if lighting != nil {
-				blitAdditive(img, lighting, cx-lighting.Bounds().Dx()/2, cy-lighting.Bounds().Dy()/2, pulse*0.75)
-			} else {
-				blitAdditive(img, r.burstGlow, cx-r.burstGlow.Bounds().Dx()/2, cy-r.burstGlow.Bounds().Dy()/2, pulse*0.75)
-			}
-			r.drawShatterParticles(img, cx, cy, math.Mod(timeMS-res.HitTime, 160.0), i*31+int(timeMS/80), 0.75)
-		}
-
 		age := timeMS - res.HitTime
 		if age < 0 || age > burstDuration {
 			continue
 		}
-		t := age / burstDuration
-		alpha := (1.0 - t) * (1.0 - t*0.35)
-		if r.lightingN != nil {
-			blitAdditive(img, r.lightingN, cx-r.lightingN.Bounds().Dx()/2, cy-r.lightingN.Bounds().Dy()/2, alpha)
-		} else {
-			blitAdditive(img, r.burstGlow, cx-r.burstGlow.Bounds().Dx()/2, cy-r.burstGlow.Bounds().Dy()/2, alpha*0.95)
-			r.drawHorizontalFlare(img, cx, cy, r.laneWidths[res.Lane], alpha)
-			r.drawShatterParticles(img, cx, cy, age, i+1, alpha)
+		lighting := r.animationFrame(r.lightingN, age, false)
+		if lighting == nil && len(r.lightingN) == 1 && age <= 220 {
+			lighting = r.lightingN[0]
 		}
-	}
-}
-
-func (r *Renderer) drawHorizontalFlare(img *image.RGBA, cx, cy, colW int, alpha float64) {
-	halfW := int(float64(colW) * 1.9 * (0.7 + 0.3*(1.0-alpha)))
-	halfH := int(math.Max(2, 6*r.scale*alpha))
-	for dy := -halfH; dy <= halfH; dy++ {
-		y := cy + dy
-		if y < 0 || y >= r.Height {
+		if lighting == nil {
 			continue
 		}
-		vy := 1.0 - math.Abs(float64(dy))/float64(halfH+1)
-		vy *= vy
-		row := y * img.Stride
-		for dx := -halfW; dx <= halfW; dx++ {
-			x := cx + dx
-			if x < 0 || x >= r.Width {
-				continue
-			}
-			vx := 1.0 - math.Abs(float64(dx))/float64(halfW+1)
-			power := vx * vx * vy * alpha * 0.75
-			if power <= 0.01 {
-				continue
-			}
-			idx := row + x*4
-			img.Pix[idx] = addClamp(img.Pix[idx], uint32(190*power))
-			img.Pix[idx+1] = addClamp(img.Pix[idx+1], uint32(232*power))
-			img.Pix[idx+2] = addClamp(img.Pix[idx+2], uint32(255*power))
-		}
+		cx := r.laneLefts[res.Lane] + r.laneWidths[res.Lane]/2
+		blitNRGBA(img, lighting, cx-lighting.Bounds().Dx()/2, r.receptorY-lighting.Bounds().Dy()/2, 1)
 	}
 }
 
-func (r *Renderer) drawShatterParticles(img *image.RGBA, cx, cy int, ageMS float64, seed int, alpha float64) {
-	t := ageMS / 220.0
-	if t < 0 || t > 1 {
-		return
+func (r *Renderer) animationFrame(frames []*image.NRGBA, elapsedMS float64, loop bool) *image.NRGBA {
+	if len(frames) == 0 {
+		return nil
 	}
-	ease := 1.0 - (1.0-t)*(1.0-t)
-	spread := float64(r.stageWidth) * 0.24 * ease
-	if spread < 26*r.scale {
-		spread = 26 * r.scale * ease
+	frame := int(math.Max(0, elapsedMS) * r.animationFrameRate() / 1000)
+	if loop {
+		frame %= len(frames)
+	} else if frame >= len(frames) {
+		return nil
 	}
-	const count = 12
-	for p := 0; p < count; p++ {
-		h := uint32(seed*1103515245 + p*2654435761)
-		angle := (float64(h%360) / 180.0 * math.Pi)
-		dist := spread * (0.35 + 0.75*float64((h>>8)%100)/100.0)
-		px := float64(cx) + math.Cos(angle)*dist
-		py := float64(cy) + math.Sin(angle)*dist*0.72 - ease*14*r.scale
-		sz := (3.5 + float64((h>>16)%5)) * r.scale * (1.0 - 0.55*t)
-		col := color.NRGBA{R: 165, G: 225, B: 255, A: uint8(clampByte(230 * alpha))}
-		if p%3 == 0 {
-			col = color.NRGBA{R: 255, G: 255, B: 255, A: uint8(clampByte(245 * alpha))}
-		}
-		drawAdditiveDiamond(img, int(math.Round(px)), int(math.Round(py)), int(math.Round(sz)), col)
+	return frames[frame]
+}
+
+func (r *Renderer) animationFrameRate() float64 {
+	if r.Skin == nil || r.Skin.AnimationFrameRate <= 0 {
+		return 30
 	}
+	return float64(r.Skin.AnimationFrameRate)
 }
 
 func (r *Renderer) drawHUD(img *image.RGBA, timeMS float64) {
@@ -602,6 +595,8 @@ func (r *Renderer) drawHUD(img *image.RGBA, timeMS float64) {
 
 	// Top-center song progress pie clock + Accuracy (matching the reference screenshot).
 	acc, combo, score, hp := statsAt(r.Stats.Results, timeMS)
+	r.drawStatsPanel(img, timeMS, acc)
+	r.drawMapInfoPanel(img, timeMS)
 	stageCenterX := (r.stageLeft + r.stageRight) / 2
 	topY := int(28 * r.scale)
 	accY := topY
@@ -633,15 +628,12 @@ func (r *Renderer) drawHUD(img *image.RGBA, timeMS float64) {
 		drawCenteredShadowText(img, scoreX-scoreW, topY, scoreText, r.scoreFace, color.White)
 	}
 
-	// Vertical cyan indicator bar to the right of the playfield (matching reference layout).
-	barX := r.stageRight + int(16*r.scale)
-	if barX+int(6*r.scale) < r.Width {
-		barTop := int(48 * r.scale)
-		barBot := r.Height - int(24*r.scale)
-		barW := int(math.Max(3, 3.5*r.scale))
-		fillAlpha(img, barX, barTop, barX+barW, barBot, color.NRGBA{R: 35, G: 55, B: 70, A: 140})
-		fillH := int(float64(barBot-barTop) * hp)
-		fillAlpha(img, barX, barBot-fillH, barX+barW, barBot, color.NRGBA{R: 72, G: 230, B: 255, A: 235})
+	// Keep the health meter in the left gutter so the side panel remains unobstructed.
+	healthBar := r.healthBarRect()
+	if !healthBar.Empty() {
+		fillAlpha(img, healthBar.Min.X, healthBar.Min.Y, healthBar.Max.X, healthBar.Max.Y, color.NRGBA{R: 35, G: 55, B: 70, A: 140})
+		fillH := int(float64(healthBar.Dy()) * hp)
+		fillAlpha(img, healthBar.Min.X, healthBar.Max.Y-fillH, healthBar.Max.X, healthBar.Max.Y, color.NRGBA{R: 72, G: 230, B: 255, A: 235})
 	}
 
 	// Combo inside the upper-middle playfield.
@@ -669,7 +661,7 @@ func (r *Renderer) drawHUD(img *image.RGBA, timeMS float64) {
 			judgeY := int(math.Round(r.Skin.Mania.ScorePosition * r.scale))
 			if sprite := r.hitSprites[res.Grade]; sprite != nil {
 				blitNRGBA(img, sprite, stageCenterX-sprite.Bounds().Dx()/2, judgeY-sprite.Bounds().Dy()/2, alpha)
-			} else {
+			} else if res.Grade != judge.MAX {
 				label, col := judgmentVisual(res.Grade, alpha)
 				lw := measureText(r.judgeFace, label)
 				drawCenteredShadowText(img, stageCenterX-lw/2, judgeY, label, r.judgeFace, col)
@@ -680,22 +672,144 @@ func (r *Renderer) drawHUD(img *image.RGBA, timeMS float64) {
 	// Hit Error Bar below the receptors.
 	r.drawHitErrorBar(img, stageCenterX, timeMS)
 
-	// Brief danser-style song info fade-out during the intro.
-	if timeMS < 3200 && (r.Map.Title != "" || r.Map.Artist != "") {
-		fade := 1.0
-		if timeMS > 2400 {
-			fade = 1.0 - (timeMS-2400)/800.0
-		}
-		a := uint8(clampByte(230 * fade))
-		title := r.Map.Title
-		if r.Map.Artist != "" {
-			title = r.Map.Artist + " - " + title
-		}
-		if r.Map.Version != "" {
-			title += " [" + r.Map.Version + "]"
-		}
-		drawShadowText(img, int(16*r.scale), int(26*r.scale), title, r.metaFace, color.NRGBA{R: 235, G: 240, B: 250, A: a})
+}
+
+func (r *Renderer) drawStatsPanel(img *image.RGBA, timeMS, accuracy float64) {
+	index := sort.Search(len(r.Stats.Results), func(i int) bool { return r.Stats.Results[i].Time > timeMS })
+	if index >= len(r.gradeStats) {
+		index = len(r.gradeStats) - 1
 	}
+	counts := r.gradeStats[index]
+	scale := r.scale
+	panel := r.statsPanelRect()
+	x, y := panel.Min.X, panel.Min.Y
+	lineHeight := int(15 * scale)
+	drawHUDPanel(img, x, y, panel.Dx(), panel.Dy())
+	cyan := color.NRGBA{R: 75, G: 220, B: 255, A: 255}
+	white := color.NRGBA{R: 238, G: 242, B: 250, A: 255}
+	drawShadowText(img, x+int(7*scale), y+int(15*scale), fmt.Sprintf("%05.2f%%", accuracy), r.metaFace, cyan)
+	ur := 0.0
+	if counts.hitCount > 0 {
+		mean := counts.hitErrorSum / float64(counts.hitCount)
+		variance := counts.hitErrorSquareSum/float64(counts.hitCount) - mean*mean
+		ur = math.Sqrt(math.Max(0, variance)) * 10
+	}
+	drawShadowText(img, x+int(7*scale), y+int(15*scale)+lineHeight, fmt.Sprintf("UR: %.2f", ur), r.metaFace, white)
+	rest := counts.perfect + counts.great + counts.good + counts.bad + counts.miss
+	ratio := float64(counts.max)
+	if rest > 0 {
+		ratio /= float64(rest)
+	}
+	drawShadowText(img, x+int(7*scale), y+int(15*scale)+2*lineHeight, fmt.Sprintf("Ratio: %.1f:1", ratio), r.metaFace, white)
+	labels := []struct {
+		name  string
+		count int
+		grade judge.Grade
+	}{
+		{"320", counts.max, judge.MAX}, {"300", counts.perfect, judge.Hit300},
+		{"200", counts.great, judge.Hit200}, {"100", counts.good, judge.Hit100},
+		{"50", counts.bad, judge.Hit50}, {"Miss", counts.miss, judge.Miss},
+	}
+	for i, label := range labels {
+		_, tint := judgmentVisual(label.grade, 1)
+		drawShadowText(img, x+int(7*scale), y+int(15*scale)+(i+3)*lineHeight, fmt.Sprintf("%s: %d", label.name, label.count), r.metaFace, tint)
+	}
+}
+
+func (r *Renderer) drawMapInfoPanel(img *image.RGBA, timeMS float64) {
+	bpm := currentBPM(r.Map.TimingPoints, timeMS)
+	text := mapInfoPanelText(r.Map, bpm)
+	panel := r.mapInfoPanelRect()
+	drawHUDPanel(img, panel.Min.X, panel.Min.Y, panel.Dx(), panel.Dy())
+	drawShadowText(img, panel.Min.X+int(7*r.scale), panel.Min.Y+int(16*r.scale), text, r.metaFace, color.NRGBA{R: 220, G: 235, B: 250, A: 255})
+}
+
+func mapInfoPanelText(m *beatmap.Map, bpm float64) string {
+	starRating := "--"
+	if m.StarRating > 0 && !math.IsNaN(m.StarRating) && !math.IsInf(m.StarRating, 0) {
+		starRating = fmt.Sprintf("%.2f", m.StarRating)
+	}
+	return fmt.Sprintf("BPM %.0f   OD %.1f   HP %.1f   SR %s", bpm, m.OD, m.HP, starRating)
+}
+
+func (r *Renderer) mapInfoPanelRect() image.Rectangle {
+	gap := int(math.Max(8, math.Round(8*r.scale)))
+	rightX := r.stageRight + gap
+	rightSpace := r.Width - rightX - gap
+	leftSpace := r.stageLeft - 2*gap
+	x, available := rightX, rightSpace
+	if rightSpace < int(190*r.scale) && leftSpace > rightSpace {
+		x, available = gap, leftSpace
+	}
+	width := minInt(int(math.Round(280*r.scale)), available)
+	height := int(math.Round(24 * r.scale))
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+	anchor := math.Max(r.Skin.Mania.ScorePosition, r.Skin.Mania.ComboPosition)
+	y := int(math.Round(anchor*r.scale)) + int(math.Round(34*r.scale))
+	if y+height > r.Height-gap {
+		y = r.Height - height - gap
+	}
+	if y < gap {
+		y = gap
+	}
+	return image.Rect(x, y, x+width, y+height)
+}
+
+func (r *Renderer) statsPanelRect() image.Rectangle {
+	scale := r.scale
+	return image.Rect(
+		int(12*scale),
+		int(56*scale),
+		int(12*scale)+int(144*scale),
+		int(56*scale)+int(150*scale),
+	)
+}
+
+func (r *Renderer) healthBarRect() image.Rectangle {
+	barW := int(math.Max(3, 3.5*r.scale))
+	top := int(48 * r.scale)
+	bottom := r.Height - int(24*r.scale)
+	if bottom <= top {
+		return image.Rectangle{}
+	}
+
+	x := r.stageLeft - int(16*r.scale) - barW
+	stats := r.statsPanelRect()
+	if x < 0 || (x < stats.Max.X && x+barW > stats.Min.X) {
+		x = r.stageRight + int(16*r.scale)
+	}
+	if x+barW > r.Width {
+		return image.Rectangle{}
+	}
+	return image.Rect(x, top, x+barW, bottom)
+}
+
+func drawHUDPanel(img *image.RGBA, x, y, width, height int) {
+	fillAlpha(img, x, y, x+width, y+height, color.NRGBA{R: 8, G: 12, B: 22, A: 188})
+	fillAlpha(img, x, y, x+width, y+1, color.NRGBA{R: 60, G: 213, B: 255, A: 220})
+	fillAlpha(img, x, y+height-1, x+width, y+height, color.NRGBA{R: 60, G: 213, B: 255, A: 180})
+	fillAlpha(img, x, y, x+1, y+height, color.NRGBA{R: 60, G: 213, B: 255, A: 180})
+	fillAlpha(img, x+width-1, y, x+width, y+height, color.NRGBA{R: 60, G: 213, B: 255, A: 180})
+}
+
+func currentBPM(points []beatmap.TimingPoint, timeMS float64) float64 {
+	index := sort.Search(len(points), func(i int) bool { return points[i].Time > timeMS })
+	for i := index - 1; i >= 0; i-- {
+		if points[i].Uninherited && points[i].BeatLength > 0 {
+			return 60000 / points[i].BeatLength
+		}
+	}
+	for i := index; i < len(points); i++ {
+		if points[i].Uninherited && points[i].BeatLength > 0 {
+			return 60000 / points[i].BeatLength
+		}
+	}
+	return 0
 }
 
 func (r *Renderer) drawHitErrorBar(img *image.RGBA, cx int, timeMS float64) {
@@ -727,12 +841,22 @@ func (r *Renderer) drawHitErrorBar(img *image.RGBA, cx int, timeMS float64) {
 		return cx + int(math.Round(ratio*float64(halfW)))
 	}
 
-	// Colored timing windows: 50 (orange) -> 100/200 (green) -> 300/300g (cyan).
-	fillAlpha(img, cx-halfW, barY-barH/2, cx+halfW, barY+barH/2, color.NRGBA{R: 218, G: 158, B: 68, A: 210})
-	x100 := int(math.Round(r.windows.W100 / maxWin * float64(halfW)))
-	fillAlpha(img, cx-x100, barY-barH/2, cx+x100, barY+barH/2, color.NRGBA{R: 96, G: 218, B: 74, A: 220})
-	x300 := int(math.Round(r.windows.W300 / maxWin * float64(halfW)))
-	fillAlpha(img, cx-x300, barY-barH/2, cx+x300, barY+barH/2, color.NRGBA{R: 80, G: 215, B: 255, A: 240})
+	// Each nested timing window uses its matching skin judgment color.
+	for _, window := range []struct {
+		width float64
+		grade judge.Grade
+	}{
+		{r.windows.W50, judge.Hit50},
+		{r.windows.W100, judge.Hit100},
+		{r.windows.W200, judge.Hit200},
+		{r.windows.W300, judge.Hit300},
+		{r.windows.W320, judge.MAX},
+	} {
+		halfWindow := int(math.Round(window.width / maxWin * float64(halfW)))
+		tint := judgmentColor(window.grade)
+		tint.A = 190
+		fillAlpha(img, cx-halfWindow, barY-barH/2, cx+halfWindow, barY+barH/2, tint)
+	}
 
 	// Recent hit error ticks.
 	const errorLife = 2200.0
@@ -791,59 +915,6 @@ func drawPieClock(img *image.RGBA, cx, cy, radius int, progress float64) {
 			blendPixel(img, x, y, 235, 240, 248, alpha)
 		}
 	}
-}
-
-func drawAdditiveDiamond(img *image.RGBA, cx, cy, r int, c color.NRGBA) {
-	if r <= 0 || c.A == 0 {
-		return
-	}
-	alphaBase := float64(c.A) / 255.0
-	for dy := -r; dy <= r; dy++ {
-		y := cy + dy
-		if y < 0 || y >= img.Bounds().Dy() {
-			continue
-		}
-		rem := r - absInt(dy)
-		row := y * img.Stride
-		for dx := -rem; dx <= rem; dx++ {
-			x := cx + dx
-			if x < 0 || x >= img.Bounds().Dx() {
-				continue
-			}
-			dist := float64(absInt(dx)+absInt(dy)) / float64(r+1)
-			power := (1.0 - dist*0.55) * alphaBase
-			idx := row + x*4
-			img.Pix[idx] = addClamp(img.Pix[idx], uint32(float64(c.R)*power))
-			img.Pix[idx+1] = addClamp(img.Pix[idx+1], uint32(float64(c.G)*power))
-			img.Pix[idx+2] = addClamp(img.Pix[idx+2], uint32(float64(c.B)*power))
-		}
-	}
-}
-
-func generateBurstGlow(size int) *image.NRGBA {
-	if size < 16 {
-		size = 16
-	}
-	img := image.NewNRGBA(image.Rect(0, 0, size, size))
-	cx, cy := float64(size-1)/2.0, float64(size-1)/2.0
-	radius := float64(size) / 2.0
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			dx, dy := (float64(x)-cx)/radius, (float64(y)-cy)/radius
-			d := math.Hypot(dx, dy)
-			if d >= 1.0 {
-				continue
-			}
-			outer := math.Pow(1.0-d, 2.2)
-			core := math.Exp(-d * d * 11.0)
-			r := clampByte(130*outer + 255*core)
-			g := clampByte(215*outer + 255*core)
-			b := clampByte(255*outer + 255*core)
-			a := clampByte(255 * math.Min(1, outer*0.9+core))
-			img.SetNRGBA(x, y, color.NRGBA{R: r, G: g, B: b, A: a})
-		}
-	}
-	return img
 }
 
 func drawCoverDim(dst *image.RGBA, src image.Image, dimFactor float64) {
@@ -936,67 +1007,74 @@ func blitNRGBA(dst *image.RGBA, src *image.NRGBA, dstX, dstY int, opacity float6
 	}
 }
 
-func blitStretchedY(dst *image.RGBA, src *image.NRGBA, dstX, dstY, targetH int, opacity float64) {
-	if src == nil || targetH <= 0 || opacity <= 0 {
+func blitLongBody(dst *image.RGBA, src *image.NRGBA, dstX, dstY, targetW, targetH int, opacity float64) {
+	if src == nil || targetW <= 0 || targetH <= 0 || opacity <= 0 {
 		return
 	}
-	sw, sh := src.Bounds().Dx(), src.Bounds().Dy()
+	bounds := src.Bounds()
+	sw, sh := bounds.Dx(), bounds.Dy()
+	if sw == 0 || sh == 0 {
+		return
+	}
 	x0, y0 := maxInt(0, dstX), maxInt(0, dstY)
-	x1, y1 := minInt(dst.Bounds().Dx(), dstX+sw), minInt(dst.Bounds().Dy(), dstY+targetH)
+	x1, y1 := minInt(dst.Bounds().Dx(), dstX+targetW), minInt(dst.Bounds().Dy(), dstY+targetH)
 	if x0 >= x1 || y0 >= y1 {
 		return
 	}
 	op := uint32(math.Round(opacity * 256))
 	for y := y0; y < y1; y++ {
-		sy := ((y - dstY) * sh) / targetH
-		if sy >= sh {
-			sy = sh - 1
+		sy := (float64(y-dstY)+0.5)*float64(sh)/float64(targetH) - 0.5
+		sy0 := int(math.Floor(sy))
+		fy := sy - float64(sy0)
+		if sy0 < 0 {
+			sy0, fy = 0, 0
 		}
-		srcRow := sy * src.Stride
+		if sy0 >= sh-1 {
+			sy0, fy = sh-1, 0
+		}
+		sy1 := minInt(sh-1, sy0+1)
+		srcRow0 := src.PixOffset(bounds.Min.X, bounds.Min.Y+sy0)
+		srcRow1 := src.PixOffset(bounds.Min.X, bounds.Min.Y+sy1)
 		dstRow := y * dst.Stride
 		for x := x0; x < x1; x++ {
-			sx := x - dstX
-			si := srcRow + sx*4
-			a := (uint32(src.Pix[si+3]) * op) >> 8
+			sx := (float64(x-dstX)+0.5)*float64(sw)/float64(targetW) - 0.5
+			sx0 := int(math.Floor(sx))
+			fx := sx - float64(sx0)
+			if sx0 < 0 {
+				sx0, fx = 0, 0
+			}
+			if sx0 >= sw-1 {
+				sx0, fx = sw-1, 0
+			}
+			sx1 := minInt(sw-1, sx0+1)
+			i00 := srcRow0 + sx0*4
+			i10 := srcRow0 + sx1*4
+			i01 := srcRow1 + sx0*4
+			i11 := srcRow1 + sx1*4
+			topAlpha := float64(src.Pix[i00+3])*(1-fx) + float64(src.Pix[i10+3])*fx
+			bottomAlpha := float64(src.Pix[i01+3])*(1-fx) + float64(src.Pix[i11+3])*fx
+			a := (uint32(math.Round(topAlpha*(1-fy)+bottomAlpha*fy)) * op) >> 8
 			if a == 0 {
 				continue
 			}
 			di := dstRow + x*4
+			if a >= 255 {
+				for channel := 0; channel < 3; channel++ {
+					top := float64(src.Pix[i00+channel])*(1-fx) + float64(src.Pix[i10+channel])*fx
+					bottom := float64(src.Pix[i01+channel])*(1-fx) + float64(src.Pix[i11+channel])*fx
+					dst.Pix[di+channel] = uint8(math.Round(top*(1-fy) + bottom*fy))
+				}
+				dst.Pix[di+3] = 255
+				continue
+			}
 			inv := 255 - a
-			dst.Pix[di] = uint8((uint32(src.Pix[si])*a + uint32(dst.Pix[di])*inv) / 255)
-			dst.Pix[di+1] = uint8((uint32(src.Pix[si+1])*a + uint32(dst.Pix[di+1])*inv) / 255)
-			dst.Pix[di+2] = uint8((uint32(src.Pix[si+2])*a + uint32(dst.Pix[di+2])*inv) / 255)
-			dst.Pix[di+3] = 255
-		}
-	}
-}
-
-func blitAdditive(dst *image.RGBA, src *image.NRGBA, dstX, dstY int, opacity float64) {
-	if src == nil || opacity <= 0 {
-		return
-	}
-	sw, sh := src.Bounds().Dx(), src.Bounds().Dy()
-	x0, y0 := maxInt(0, dstX), maxInt(0, dstY)
-	x1, y1 := minInt(dst.Bounds().Dx(), dstX+sw), minInt(dst.Bounds().Dy(), dstY+sh)
-	if x0 >= x1 || y0 >= y1 {
-		return
-	}
-	op := uint32(math.Round(opacity * 256))
-	for y := y0; y < y1; y++ {
-		sy := y - dstY
-		srcRow := sy * src.Stride
-		dstRow := y * dst.Stride
-		for x := x0; x < x1; x++ {
-			sx := x - dstX
-			si := srcRow + sx*4
-			a := (uint32(src.Pix[si+3]) * op) >> 8
-			if a == 0 {
-				continue
+			for channel := 0; channel < 3; channel++ {
+				top := float64(src.Pix[i00+channel])*(1-fx) + float64(src.Pix[i10+channel])*fx
+				bottom := float64(src.Pix[i01+channel])*(1-fx) + float64(src.Pix[i11+channel])*fx
+				value := uint32(math.Round(top*(1-fy) + bottom*fy))
+				dst.Pix[di+channel] = uint8((value*a + uint32(dst.Pix[di+channel])*inv) / 255)
 			}
-			di := dstRow + x*4
-			dst.Pix[di] = addClamp(dst.Pix[di], (uint32(src.Pix[si])*a)>>8)
-			dst.Pix[di+1] = addClamp(dst.Pix[di+1], (uint32(src.Pix[si+1])*a)>>8)
-			dst.Pix[di+2] = addClamp(dst.Pix[di+2], (uint32(src.Pix[si+2])*a)>>8)
+			dst.Pix[di+3] = 255
 		}
 	}
 }
@@ -1120,33 +1198,45 @@ func measureText(face font.Face, text string) int {
 }
 
 func judgmentVisual(g judge.Grade, alpha float64) (string, color.NRGBA) {
-	a := clampByte(alpha * 255)
+	tint := judgmentColor(g)
+	tint.A = clampByte(alpha * 255)
 	switch g {
 	case judge.MAX:
-		return "300g", color.NRGBA{R: 135, G: 235, B: 255, A: a}
+		return "320", tint
 	case judge.Hit300:
-		return "300", color.NRGBA{R: 90, G: 205, B: 255, A: a}
+		return "300", tint
 	case judge.Hit200:
-		return "200", color.NRGBA{R: 120, G: 235, B: 125, A: a}
+		return "200", tint
 	case judge.Hit100:
-		return "100", color.NRGBA{R: 115, G: 185, B: 255, A: a}
+		return "100", tint
 	case judge.Hit50:
-		return "50", color.NRGBA{R: 245, G: 185, B: 85, A: a}
+		return "50", tint
 	default:
-		return "MISS", color.NRGBA{R: 240, G: 75, B: 75, A: a}
+		return "MISS", tint
+	}
+}
+
+func judgmentColor(g judge.Grade) color.NRGBA {
+	switch g {
+	case judge.MAX:
+		return color.NRGBA{R: 145, G: 225, B: 255, A: 255}
+	case judge.Hit300:
+		return color.NRGBA{R: 255, G: 147, B: 18, A: 255}
+	case judge.Hit200:
+		return color.NRGBA{R: 153, G: 220, B: 35, A: 255}
+	case judge.Hit100:
+		return color.NRGBA{R: 36, G: 130, B: 255, A: 255}
+	case judge.Hit50:
+		return color.NRGBA{R: 166, G: 42, B: 255, A: 255}
+	default:
+		return color.NRGBA{R: 240, G: 75, B: 75, A: 255}
 	}
 }
 
 func errorTickColor(g judge.Grade, alpha float64) color.NRGBA {
-	a := clampByte(alpha * 220)
-	switch g {
-	case judge.MAX, judge.Hit300:
-		return color.NRGBA{R: 90, G: 225, B: 255, A: a}
-	case judge.Hit200, judge.Hit100:
-		return color.NRGBA{R: 105, G: 230, B: 95, A: a}
-	default:
-		return color.NRGBA{R: 235, G: 170, B: 75, A: a}
-	}
+	tint := judgmentColor(g)
+	tint.A = clampByte(alpha * 220)
+	return tint
 }
 
 func keyMaskAt(events []replay.Event, time float64) uint32 {
@@ -1163,7 +1253,18 @@ func statsAt(results []judge.Result, time float64) (acc float64, combo, score in
 		return 100.0, 0, 0, 1.0
 	}
 	r := results[end-1]
-	return r.AccuracyAfter, r.ComboAfter, r.ScoreAfter, r.HPAfter
+	acc, combo, score, hp = r.AccuracyAfter, r.ComboAfter, r.ScoreAfter, r.HPAfter
+	if end < len(results) {
+		next := results[end]
+		span := next.Time - r.Time
+		if span > 0 {
+			progress := math.Max(0, math.Min(1, (time-r.Time)/span))
+			acc += (next.AccuracyAfter - acc) * progress
+			score = int(math.Round(float64(score) + float64(next.ScoreAfter-score)*progress))
+			hp += (next.HPAfter - hp) * progress
+		}
+	}
+	return acc, combo, score, hp
 }
 
 func latestResultIndex(results []judge.Result, time float64) (int, bool) {
@@ -1191,14 +1292,6 @@ func maxMapTime(m *beatmap.Map) float64 {
 		}
 	}
 	return end
-}
-
-func addClamp(base byte, add uint32) byte {
-	v := uint32(base) + add
-	if v > 255 {
-		return 255
-	}
-	return byte(v)
 }
 
 func clamp01(v float64) float64 {

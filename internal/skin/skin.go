@@ -6,12 +6,16 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
-	"image/png"
+	_ "image/jpeg"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"golang.org/x/image/tiff"
+	_ "image/png"
 )
 
 type ManiaConfig struct {
@@ -42,22 +46,23 @@ type ManiaConfig struct {
 }
 
 type Skin struct {
-	Dir          string
-	Keys         int
-	ColumnWidth  float64
-	Mania        ManiaConfig
-	ScorePrefix  string
-	ComboPrefix  string
-	ScoreOverlap int
-	ComboOverlap int
-	Images       map[string]*image.NRGBA
-	FallbackNote []*image.NRGBA
-	FallbackHead []*image.NRGBA
-	FallbackBody []*image.NRGBA
-	FallbackTail []*image.NRGBA
-	FallbackKey  []*image.NRGBA
-	FallbackKeyD []*image.NRGBA
-	LaneColors   []color.NRGBA
+	Dir                string
+	Keys               int
+	ColumnWidth        float64
+	AnimationFrameRate int
+	Mania              ManiaConfig
+	ScorePrefix        string
+	ComboPrefix        string
+	ScoreOverlap       int
+	ComboOverlap       int
+	Images             map[string]*image.NRGBA
+	FallbackNote       []*image.NRGBA
+	FallbackHead       []*image.NRGBA
+	FallbackBody       []*image.NRGBA
+	FallbackTail       []*image.NRGBA
+	FallbackKey        []*image.NRGBA
+	FallbackKeyD       []*image.NRGBA
+	LaneColors         []color.NRGBA
 }
 
 var defaultHitNames = []string{
@@ -73,14 +78,15 @@ func Load(dir string, keys int) (*Skin, error) {
 		defaultWidth = 34.0
 	}
 	s := &Skin{
-		Dir:         dir,
-		Keys:        keys,
-		ColumnWidth: defaultWidth,
-		ScorePrefix: "score",
-		ComboPrefix: "score",
-		Images:      make(map[string]*image.NRGBA),
-		Mania:       defaultManiaConfig(keys, defaultWidth),
-		LaneColors:  defaultPalette(keys),
+		Dir:                dir,
+		Keys:               keys,
+		ColumnWidth:        defaultWidth,
+		AnimationFrameRate: 30,
+		ScorePrefix:        "score",
+		ComboPrefix:        "score",
+		Images:             make(map[string]*image.NRGBA),
+		Mania:              defaultManiaConfig(keys, defaultWidth),
+		LaneColors:         defaultPalette(keys),
 	}
 	s.generateFallbacks()
 
@@ -154,6 +160,20 @@ func Load(dir string, keys int) (*Skin, error) {
 	for name := range names {
 		if _, err := s.loadSprite(name); err != nil {
 			return nil, err
+		}
+	}
+	for _, prefix := range []string{s.Mania.LightingN, s.Mania.LightingL} {
+		if prefix == "" {
+			continue
+		}
+		for frame := 0; frame < 256; frame++ {
+			name := fmt.Sprintf("%s-%d", prefix, frame)
+			if _, err := s.loadSprite(name); err != nil {
+				return nil, err
+			}
+			if s.Image(name) == nil {
+				break
+			}
 		}
 	}
 	return s, nil
@@ -381,6 +401,13 @@ func (s *Skin) parseINI(path string) error {
 	var genericMania *rawBlock
 	for i := range blocks {
 		b := &blocks[i]
+		if strings.EqualFold(b.name, "General") {
+			if v, ok := b.kv["AnimationFramerate"]; ok {
+				if rate, err := strconv.Atoi(v); err == nil && rate > 0 && rate <= 120 {
+					s.AnimationFrameRate = rate
+				}
+			}
+		}
 		if strings.EqualFold(b.name, "Fonts") {
 			if v, ok := b.kv["ScorePrefix"]; ok && v != "" {
 				s.ScorePrefix = cleanSpriteRef(v)
@@ -419,6 +446,11 @@ func (s *Skin) parseINI(path string) error {
 	}
 
 	kv := matchedMania.kv
+	if v, ok := kv["LightFramePerSecond"]; ok {
+		if rate, err := strconv.Atoi(v); err == nil && rate > 0 && rate <= 120 {
+			s.AnimationFrameRate = rate
+		}
+	}
 	if v, ok := kv["HitPosition"]; ok {
 		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 100 && f <= 480 {
 			s.Mania.HitPosition = f
@@ -561,7 +593,14 @@ func (s *Skin) loadSprite(name string) (*image.NRGBA, error) {
 			}
 			return nil, err
 		}
-		decoded, decErr := png.Decode(file)
+		decoded, _, decErr := image.Decode(file)
+		if decErr != nil {
+			if _, seekErr := file.Seek(0, io.SeekStart); seekErr != nil {
+				_ = file.Close()
+				return nil, fmt.Errorf("rewind skin image %s: %w", path, seekErr)
+			}
+			decoded, decErr = tiff.Decode(file)
+		}
 		closeErr := file.Close()
 		if decErr != nil {
 			return nil, fmt.Errorf("decode skin image %s: %w", path, decErr)
@@ -591,6 +630,18 @@ func (s *Skin) Image(name string) *image.NRGBA {
 		return nil
 	}
 	return s.Images[name]
+}
+
+func (s *Skin) AnimationFrames(prefix string) []*image.NRGBA {
+	frames := make([]*image.NRGBA, 0)
+	for frame := 0; frame < 256; frame++ {
+		sprite := s.Image(fmt.Sprintf("%s-%d", prefix, frame))
+		if sprite == nil {
+			break
+		}
+		frames = append(frames, sprite)
+	}
+	return frames
 }
 
 func (s *Skin) NoteSprite(lane int) *image.NRGBA {

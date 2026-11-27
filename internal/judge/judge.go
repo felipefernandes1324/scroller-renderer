@@ -205,6 +205,16 @@ func ApplyReplaySummary(stats *Stats, summary replay.ScoreSummary) {
 		return
 	}
 	last := &stats.Results[len(stats.Results)-1]
+	simulatedScore := last.ScoreAfter
+	for i := range stats.Results {
+		result := &stats.Results[i]
+		if simulatedScore > 0 {
+			result.ScoreAfter = int(math.Round(float64(summary.Score) * float64(result.ScoreAfter) / float64(simulatedScore)))
+		} else if summary.Score > 0 {
+			result.ScoreAfter = int(math.Round(float64(summary.Score) * float64(i+1) / float64(len(stats.Results))))
+		}
+	}
+	last = &stats.Results[len(stats.Results)-1]
 	last.AccuracyAfter = stats.Accuracy
 	last.ScoreAfter = summary.Score
 }
