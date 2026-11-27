@@ -24,15 +24,17 @@ import (
 )
 
 type Renderer struct {
-	Width, Height int
-	Map           *beatmap.Map
-	Skin          *skin.Skin
-	Timeline      *sv.Timeline
-	Stats         judge.Stats
-	Replay        []replay.Event
-	Speed         float64
-	ScrollSpeed   float64
-	DurationMS    float64
+	Width, Height      int
+	Map                *beatmap.Map
+	Skin               *skin.Skin
+	Timeline           *sv.Timeline
+	Stats              judge.Stats
+	Replay             []replay.Event
+	Speed              float64
+	ScrollSpeed        float64
+	DurationMS         float64
+	ShowScoreResult    bool
+	ScoreResultStartMS float64
 
 	prepared       bool
 	scale          float64
@@ -56,6 +58,7 @@ type Renderer struct {
 	lightingN      []*image.NRGBA
 	lightingL      []*image.NRGBA
 	scoreGlyphs    map[rune]*image.NRGBA
+	resultGlyphs   map[rune]*image.NRGBA
 	comboGlyphs    map[rune]*image.NRGBA
 	notes          []noteVisual
 	comboFace      font.Face
@@ -89,6 +92,10 @@ func (r *Renderer) Frame(timeMS float64) *image.RGBA {
 func (r *Renderer) FrameInto(timeMS float64, img *image.RGBA) {
 	r.prepare()
 	copy(img.Pix, r.baseBackdrop)
+	if r.ShowScoreResult && timeMS >= r.ScoreResultStartMS {
+		r.drawScoreResult(img)
+		return
+	}
 
 	mask := keyMaskAt(r.Replay, timeMS)
 	for lane := 0; lane < r.Map.Keys; lane++ {
@@ -410,6 +417,7 @@ func (r *Renderer) prepareSprites() {
 	r.lightingN = r.prepareLightingFrames(r.Skin.Mania.LightingN, lightWidth)
 	r.lightingL = r.prepareLightingFrames(r.Skin.Mania.LightingL, lightWidth)
 	r.scoreGlyphs = prepareNumberGlyphs(r.Skin, r.Skin.ScorePrefix, int(math.Max(10, 20*r.scale)))
+	r.resultGlyphs = prepareNumberGlyphs(r.Skin, r.Skin.ScorePrefix, int(math.Max(16, 34*r.scale)))
 	r.comboGlyphs = prepareNumberGlyphs(r.Skin, r.Skin.ComboPrefix, int(math.Max(10, 28*r.scale)))
 }
 
@@ -672,6 +680,163 @@ func (r *Renderer) drawHUD(img *image.RGBA, timeMS float64) {
 	// Hit Error Bar below the receptors.
 	r.drawHitErrorBar(img, stageCenterX, timeMS)
 
+}
+
+func (r *Renderer) drawScoreResult(img *image.RGBA) {
+	counts := gradeSnapshot{}
+	if len(r.gradeStats) > 0 {
+		counts = r.gradeStats[len(r.gradeStats)-1]
+	}
+	rank := resultRank(r.Stats.Accuracy, counts)
+	rankSprite := r.Skin.Image("ranking-" + rank)
+	fullBackground := isFullResultBackground(rankSprite)
+
+	fillAlpha(img, 0, 0, r.Width, r.Height, color.NRGBA{R: 3, G: 6, B: 12, A: 215})
+	if fullBackground {
+		drawResultBackground(img, rankSprite)
+	}
+
+	if !fullBackground {
+		iconHeight := int(float64(r.Height) * 0.54)
+		if usableSkinSprite(rankSprite) {
+			drawFittedResultSprite(img, rankSprite, int(float64(r.Width)*0.24), r.Height/2, int(float64(r.Width)*0.40), iconHeight)
+		} else {
+			label := rank
+			labelWidth := measureText(r.scoreFace, label)
+			drawCenteredShadowText(img, int(float64(r.Width)*0.24)-labelWidth/2, r.Height/2, label, r.scoreFace, color.NRGBA{R: 78, G: 221, B: 255, A: 255})
+		}
+	}
+
+	panelSprite := r.Skin.Image("ranking-panel")
+	panelAspect := 622.0 / 505.0
+	if usableSkinSprite(panelSprite) {
+		panelAspect = float64(panelSprite.Bounds().Dx()) / float64(panelSprite.Bounds().Dy())
+	}
+	panelWidth := minInt(int(float64(r.Width)*0.40), int(float64(r.Height)*0.88*panelAspect))
+	panelHeight := int(math.Round(float64(panelWidth) / panelAspect))
+	panelX := r.Width - panelWidth - int(float64(r.Width)*0.045)
+	panelY := (r.Height - panelHeight) / 2
+	if usableSkinSprite(panelSprite) {
+		panel := scaleNRGBA(panelSprite, panelWidth, panelHeight)
+		blitNRGBA(img, panel, panelX, panelY, 1)
+	} else {
+		drawHUDPanel(img, panelX, panelY, panelWidth, panelHeight)
+	}
+
+	centerX := panelX + panelWidth/2
+	titleY := panelY + int(float64(panelHeight)*0.105)
+	if !drawFittedResultSprite(img, r.Skin.Image("ranking-title"), centerX, titleY, int(float64(panelWidth)*0.58), int(float64(panelHeight)*0.10)) {
+		drawCenteredShadowText(img, centerX-measureText(r.judgeFace, "SCORE RESULT")/2, titleY, "SCORE RESULT", r.judgeFace, color.White)
+	}
+	if counts.miss == 0 && len(r.Stats.Results) > 0 {
+		drawFittedResultSprite(img, r.Skin.Image("ranking-perfect"), centerX, panelY+int(float64(panelHeight)*0.205), int(float64(panelWidth)*0.38), int(float64(panelHeight)*0.085))
+	}
+
+	score := 0
+	if len(r.Stats.Results) > 0 {
+		score = r.Stats.Results[len(r.Stats.Results)-1].ScoreAfter
+	}
+	r.drawResultLabel(img, centerX, panelY+int(float64(panelHeight)*0.285), "SCORE", color.NRGBA{R: 220, G: 231, B: 243, A: 255})
+	r.drawResultValue(img, centerX, panelY+int(float64(panelHeight)*0.355), fmt.Sprintf("%08d", score))
+
+	accuracyLabelY := panelY + int(float64(panelHeight)*0.455)
+	if !drawFittedResultSprite(img, r.Skin.Image("ranking-accuracy"), centerX, accuracyLabelY, int(float64(panelWidth)*0.36), int(float64(panelHeight)*0.06)) {
+		r.drawResultLabel(img, centerX, accuracyLabelY, "ACCURACY", color.NRGBA{R: 220, G: 231, B: 243, A: 255})
+	}
+	r.drawResultValue(img, centerX, panelY+int(float64(panelHeight)*0.525), fmt.Sprintf("%.2f%%", r.Stats.Accuracy))
+
+	comboY := panelY + int(float64(panelHeight)*0.645)
+	if !drawFittedResultSprite(img, r.Skin.Image("ranking-maxcombo"), centerX, comboY, int(float64(panelWidth)*0.34), int(float64(panelHeight)*0.065)) {
+		r.drawResultLabel(img, centerX, comboY, "MAX COMBO", color.NRGBA{R: 220, G: 231, B: 243, A: 255})
+	}
+	r.drawResultValue(img, centerX, panelY+int(float64(panelHeight)*0.705), fmt.Sprintf("%d", r.Stats.MaxCombo))
+
+	labels := []struct {
+		name  string
+		count int
+		grade judge.Grade
+	}{
+		{"320", counts.max, judge.MAX}, {"300", counts.perfect, judge.Hit300},
+		{"200", counts.great, judge.Hit200}, {"100", counts.good, judge.Hit100},
+		{"50", counts.bad, judge.Hit50}, {"Miss", counts.miss, judge.Miss},
+	}
+	gridTop := panelY + int(float64(panelHeight)*0.805)
+	rowHeight := int(float64(panelHeight) * 0.075)
+	columnWidth := panelWidth / 2
+	for i, entry := range labels {
+		column := i / 3
+		row := i % 3
+		x := panelX + int(float64(panelWidth)*0.10) + column*columnWidth
+		y := gridTop + row*rowHeight
+		label, tint := judgmentVisual(entry.grade, 1)
+		if entry.name != "Miss" {
+			label = entry.name
+		}
+		drawCenteredShadowText(img, x, y, fmt.Sprintf("%s  %d", label, entry.count), r.metaFace, tint)
+	}
+}
+
+func (r *Renderer) drawResultLabel(img *image.RGBA, centerX, centerY int, text string, tint color.NRGBA) {
+	drawCenteredShadowText(img, centerX-measureText(r.metaFace, text)/2, centerY, text, r.metaFace, tint)
+}
+
+func (r *Renderer) drawResultValue(img *image.RGBA, centerX, centerY int, text string) {
+	if r.drawSkinText(img, text, r.resultGlyphs, centerX, centerY, r.Skin.ScoreOverlap, textAlignCenter) {
+		return
+	}
+	width := measureText(r.scoreFace, text)
+	drawCenteredShadowText(img, centerX-width/2, centerY, text, r.scoreFace, color.White)
+}
+
+func resultRank(accuracy float64, counts gradeSnapshot) string {
+	switch {
+	case accuracy >= 100 && counts.miss == 0:
+		return "X"
+	case accuracy >= 95 && counts.miss == 0:
+		return "S"
+	case accuracy >= 90:
+		return "A"
+	case accuracy >= 80:
+		return "B"
+	case accuracy >= 70:
+		return "C"
+	default:
+		return "D"
+	}
+}
+
+func isFullResultBackground(sprite *image.NRGBA) bool {
+	if !usableSkinSprite(sprite) || sprite.Bounds().Dx() < 1000 || sprite.Bounds().Dy() < 600 {
+		return false
+	}
+	imageAspect := float64(sprite.Bounds().Dx()) / float64(sprite.Bounds().Dy())
+	return imageAspect > 1.45
+}
+
+func drawResultBackground(dst *image.RGBA, src *image.NRGBA) {
+	screen := dst.Bounds()
+	imageAspect := float64(src.Bounds().Dx()) / float64(src.Bounds().Dy())
+	screenAspect := float64(screen.Dx()) / float64(screen.Dy())
+	width, height := screen.Dx(), screen.Dy()
+	if imageAspect > screenAspect {
+		width = int(math.Round(float64(height) * imageAspect))
+	} else {
+		height = int(math.Round(float64(width) / imageAspect))
+	}
+	scaled := scaleNRGBA(src, width, height)
+	blitNRGBA(dst, scaled, (screen.Dx()-width)/2, (screen.Dy()-height)/2, 1)
+}
+
+func drawFittedResultSprite(dst *image.RGBA, src *image.NRGBA, centerX, centerY, maxWidth, maxHeight int) bool {
+	if !usableSkinSprite(src) || maxWidth <= 0 || maxHeight <= 0 {
+		return false
+	}
+	bounds := src.Bounds()
+	factor := math.Min(float64(maxWidth)/float64(bounds.Dx()), float64(maxHeight)/float64(bounds.Dy()))
+	width := maxInt(1, int(math.Round(float64(bounds.Dx())*factor)))
+	height := maxInt(1, int(math.Round(float64(bounds.Dy())*factor)))
+	blitNRGBA(dst, scaleNRGBA(src, width, height), centerX-width/2, centerY-height/2, 1)
+	return true
 }
 
 func (r *Renderer) drawStatsPanel(img *image.RGBA, timeMS, accuracy float64) {

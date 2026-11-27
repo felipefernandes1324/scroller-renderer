@@ -1,0 +1,83 @@
+name: Build release packages
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go mod download
+      - id: package
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          name="scroller-renderer-${GOOS}-${GOARCH}"
+          directory="dist/${name}"
+          mkdir -p "$directory"
+          binary="scroller-renderer"
+          if [ "$GOOS" = "windows" ]; then
+            binary="${binary}.exe"
+          fi
+          CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build \
+            -trimpath -ldflags="-s -w" \
+            -o "${directory}/${binary}" ./cmd/mania-renderer
+          cp packaging/README.txt "${directory}/README.txt"
+          if [ "$GOOS" = "windows" ]; then
+            cp packaging/start-windows.bat "${directory}/start.bat"
+            archive="${name}.zip"
+            (cd dist && zip -qr "$archive" "$name")
+          else
+            cp packaging/start-unix.sh "${directory}/start.sh"
+            chmod +x "${directory}/start.sh"
+            archive="${name}.tar.gz"
+            tar -czf "dist/${archive}" -C dist "$name"
+          fi
+          echo "archive=dist/${archive}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: package-*
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.zip
+            dist/*.tar.gz

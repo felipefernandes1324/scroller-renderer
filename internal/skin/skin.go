@@ -112,6 +112,13 @@ func Load(dir string, keys int) (*Skin, error) {
 	for _, n := range defaultHitNames {
 		names[n] = struct{}{}
 	}
+	for _, n := range []string{
+		"ranking-panel", "ranking-title", "ranking-accuracy", "ranking-maxcombo",
+		"ranking-perfect", "ranking-X", "ranking-S",
+		"ranking-A", "ranking-B", "ranking-C", "ranking-D",
+	} {
+		names[n] = struct{}{}
+	}
 	for _, mapped := range s.Mania.HitImages {
 		if mapped != "" {
 			names[mapped] = struct{}{}

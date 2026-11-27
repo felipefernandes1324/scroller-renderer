@@ -110,7 +110,8 @@ func runWithProgress(osuPath, osrPath, skinPath, output string, fps float64, mot
 		return err
 	}
 	defer os.Remove(wavPath)
-	minimumAudioSeconds := (maxTime + 1500) / 1000
+	const scoreResultHoldMS = 5000.0
+	minimumAudioSeconds := (maxTime + scoreResultHoldMS) / 1000
 	duration, err := audio.Mix(m.AudioPath(), skinPath, filepath.Dir(osuPath), wavPath, stats.Results, minimumAudioSeconds, musicVolume, hitsoundVolume)
 	if err != nil {
 		return fmt.Errorf("mix audio: %w", err)
@@ -134,6 +135,7 @@ func runWithProgress(osuPath, osrPath, skinPath, output string, fps float64, mot
 	render := &renderer.Renderer{
 		Width: width, Height: height, Map: m, Skin: loadedSkin,
 		Timeline: sv.New(m.TimingPoints), Stats: stats, Replay: events, Speed: speed, ScrollSpeed: scrollSpeed, DurationMS: duration * 1000,
+		ShowScoreResult: true, ScoreResultStartMS: maxTime,
 	}
 	frameBuffer := image.NewRGBA(image.Rect(0, 0, width, height))
 	accumulated := make([]uint32, width*height*4)
