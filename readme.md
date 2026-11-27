@@ -1,4 +1,4 @@
-# scroller-renderer
+# Scroller | Osu! Mania replay renderer
 
 Renderizador em Go para replay de osu!mania a partir de beatmaps
 `.osu`, replay `.osr` (ou auto-play) e skin. O renderizador usa buffers
@@ -76,7 +76,7 @@ go run ./cmd/mania-renderer -gui
 
 O navegador abre uma interface local em que basta selecionar o replay `.osr`.
 O mapa é encontrado pelo hash do replay dentro da pasta `Songs` do osu!, e o
-áudio é lido da pasta do mapa. Para usar uma skin, escolha sua pasta no campo
+áudio é lido da pasta do mapa. Para usar uma skin, escolha sua skin no campo
 “Skin personalizada”; selecione a pasta que contém `skin.ini`. A skin não
 precisa estar instalada no osu!: seus arquivos são enviados para uso
 temporário, removidos ao fim do render e não são adicionados ao repositório.
