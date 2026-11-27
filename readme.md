@@ -11,7 +11,7 @@ PCM/hitsounds e entrega vídeo H.264/AAC ao FFmpeg.
 - FFmpeg com `libx264` e encoder AAC disponível no `PATH`
 - Dependências Go declaradas no `go.mod`:
   - `github.com/ulikunitz/xz/lzma` para decodificar replays
-  - `golang.org/x/image/font/basicfont` para o HUD
+  - `golang.org/x/image` para fontes TrueType embutidas, escalonamento de sprites e HUD
 
 ## Instalação
 
@@ -50,9 +50,22 @@ go run ./cmd/mania-renderer -osu ./map.osu -out render.mp4 -fps 60 -motionblur 4
 ```
 
 Flags: `-osu` (obrigatória), `-osr`, `-skin`, `-out`, `-fps`, `-motionblur`
-(subframes por quadro), `-speed` (0.5 a 2), `-w` e `-h` (dimensões pares).
-As imagens PNG de notas, teclas e julgamentos existentes na skin são carregadas;
-quando ausentes, o renderer desenha elementos procedurais. Áudio e vídeo são
-processados em memória/stream, com um WAV temporário removido ao terminar.
+(subframes por quadro), `-speed` (0.5 a 2), `-scrollspeed` (5 a 40, padrão 24), `-w` e `-h` (dimensões pares).
+Com `-skin`, o renderer carrega sprites Mania de notas, LNs, teclas, stage,
+iluminação e hitbursts, além das fontes numéricas `ScorePrefix`/`ComboPrefix`
+para score, combo e accuracy. Aplica `ColumnWidth`, `HitPosition`,
+`ScorePosition` (hitbursts), `ComboPosition`, `LightPosition`, cores e demais
+assets reconhecidos pelo `skin.ini`; imagens ausentes usam substitutos
+procedurais. `AccuracyPosition` não é uma chave padrão do `skin.ini`; como
+extensão, pode ser definida em `[Mania]` (ou `[Mania{K}K]`) entre 0 e 480 para
+posicionar verticalmente o indicador de accuracy. Sem essa chave, ele mantém a
+posição padrão do HUD.
+
+Para replays `.osr`, score e accuracy finais são lidos dos contadores originais
+do replay e calculados com a regra ScoreV1/ScoreV2 apropriada. O SV variável do
+mapa vem dos `TimingPoints` do `.osu`. O `.osr` padrão não armazena a velocidade
+de rolagem escolhida nas opções locais do jogador; para aproximá-la, informe
+`-scrollspeed` (5 a 40; padrão 24). Áudio e vídeo são processados em
+memória/stream, com WAV temporário removido.
 
 Execute os testes com `go test ./...`.

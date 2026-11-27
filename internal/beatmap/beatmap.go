@@ -11,23 +11,29 @@ import (
 )
 
 type TimingPoint struct {
-	Time       float64
-	BeatLength float64
+	Time        float64
+	BeatLength  float64
 	Uninherited bool
 }
 
 type HitObject struct {
-	Time  float64
-	End   float64
-	Lane  int
-	Long  bool
-	Sound int
+	Time   float64
+	End    float64
+	Lane   int
+	Long   bool
+	Sound  int
 	Sample string
 }
 
 type Map struct {
 	Path          string
 	AudioFilename string
+	Background    string
+	Title         string
+	Artist        string
+	Version       string
+	Creator       string
+	AudioLeadIn   float64
 	Mode          int
 	Keys          int
 	OD            float64
@@ -63,12 +69,40 @@ func Parse(path string) (*Map, error) {
 				switch strings.TrimSpace(key) {
 				case "AudioFilename":
 					m.AudioFilename = strings.TrimSpace(value)
+				case "AudioLeadIn":
+					lead, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+					if err == nil && lead >= 0 {
+						m.AudioLeadIn = lead
+					}
 				case "Mode":
 					mode, err := strconv.Atoi(strings.TrimSpace(value))
 					if err != nil {
 						return nil, fmt.Errorf("line %d: invalid game mode: %w", lineNo, err)
 					}
 					m.Mode = mode
+				}
+			}
+		case "Metadata":
+			if key, value, ok := strings.Cut(line, ":"); ok {
+				switch strings.TrimSpace(key) {
+				case "Title":
+					m.Title = strings.TrimSpace(value)
+				case "Artist":
+					m.Artist = strings.TrimSpace(value)
+				case "Version":
+					m.Version = strings.TrimSpace(value)
+				case "Creator":
+					m.Creator = strings.TrimSpace(value)
+				}
+			}
+		case "Events":
+			if m.Background == "" {
+				fields := strings.Split(line, ",")
+				if len(fields) >= 3 && (strings.TrimSpace(fields[0]) == "0" || strings.EqualFold(strings.TrimSpace(fields[0]), "Background")) {
+					bg := strings.Trim(strings.TrimSpace(fields[2]), `"`)
+					if bg != "" {
+						m.Background = bg
+					}
 				}
 			}
 		case "Difficulty":
@@ -160,4 +194,11 @@ func (m *Map) AudioPath() string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(m.Path), filepath.FromSlash(m.AudioFilename))
+}
+
+func (m *Map) BackgroundPath() string {
+	if m.Background == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(m.Path), filepath.FromSlash(m.Background))
 }

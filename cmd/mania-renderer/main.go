@@ -27,21 +27,22 @@ func main() {
 	fps := flag.Float64("fps", 60, "output frames per second")
 	motionBlur := flag.Int("motionblur", 1, "temporal samples per output frame")
 	speed := flag.Float64("speed", 1, "playback speed (0.5..2)")
+	scrollSpeed := flag.Float64("scrollspeed", 24, "osu!mania scroll speed (5..40)")
 	width := flag.Int("w", 1280, "video width")
 	height := flag.Int("h", 720, "video height")
 	flag.Parse()
-	if err := run(*osuPath, *osrPath, *skinPath, *output, *fps, *motionBlur, *speed, *width, *height); err != nil {
+	if err := run(*osuPath, *osrPath, *skinPath, *output, *fps, *motionBlur, *speed, *scrollSpeed, *width, *height); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(osuPath, osrPath, skinPath, output string, fps float64, motionBlur int, speed float64, width, height int) error {
+func run(osuPath, osrPath, skinPath, output string, fps float64, motionBlur int, speed, scrollSpeed float64, width, height int) error {
 	if osuPath == "" {
 		return fmt.Errorf("-osu is required")
 	}
 	if fps <= 0 || fps > 240 || motionBlur < 1 || motionBlur > 32 || speed < 0.5 || speed > 2 ||
-		width < 16 || height < 16 || width%2 != 0 || height%2 != 0 {
-		return fmt.Errorf("invalid render options: fps must be (0,240], motionblur 1..32, speed 0.5..2, and dimensions even and >=16")
+		scrollSpeed < 5 || scrollSpeed > 40 || width < 16 || height < 16 || width%2 != 0 || height%2 != 0 {
+		return fmt.Errorf("invalid render options: fps must be (0,240], motionblur 1..32, speed 0.5..2, scrollspeed 5..40, and dimensions even and >=16")
 	}
 	if err := encoder.Check(); err != nil {
 		return err
@@ -51,15 +52,22 @@ func run(osuPath, osrPath, skinPath, output string, fps float64, motionBlur int,
 		return fmt.Errorf("parse beatmap: %w", err)
 	}
 	var events []replay.Event
+	var replaySummary *replay.ScoreSummary
 	if osrPath == "" {
 		events = replay.Auto(m.Objects, m.Keys)
 	} else {
-		events, err = replay.Parse(osrPath, m.Keys)
+		parsed, parseErr := replay.ParseReplay(osrPath, m.Keys)
+		err = parseErr
 		if err != nil {
 			return fmt.Errorf("parse replay: %w", err)
 		}
+		events = parsed.Events
+		replaySummary = &parsed.Summary
 	}
 	stats := judge.Simulate(m.Objects, events, m.OD)
+	if replaySummary != nil {
+		judge.ApplyReplaySummary(&stats, *replaySummary)
+	}
 	loadedSkin, err := skin.Load(skinPath, m.Keys)
 	if err != nil {
 		return fmt.Errorf("load skin: %w", err)
@@ -108,7 +116,7 @@ func run(osuPath, osrPath, skinPath, output string, fps float64, motionBlur int,
 	}()
 	render := &renderer.Renderer{
 		Width: width, Height: height, Map: m, Skin: loadedSkin,
-		Timeline: sv.New(m.TimingPoints), Stats: stats, Replay: events, Speed: speed, DurationMS: duration * 1000,
+		Timeline: sv.New(m.TimingPoints), Stats: stats, Replay: events, Speed: speed, ScrollSpeed: scrollSpeed, DurationMS: duration * 1000,
 	}
 	frameBuffer := image.NewRGBA(image.Rect(0, 0, width, height))
 	accumulated := make([]uint32, width*height*4)
@@ -118,7 +126,7 @@ func run(osuPath, osrPath, skinPath, output string, fps float64, motionBlur int,
 			accumulated[i] = 0
 		}
 		for sample := 0; sample < motionBlur; sample++ {
-			timeMS := (float64(frame)+float64(sample)/float64(motionBlur))*1000*speed/fps
+			timeMS := (float64(frame) + float64(sample)/float64(motionBlur)) * 1000 * speed / fps
 			render.FrameInto(timeMS, frameBuffer)
 			for i, value := range frameBuffer.Pix {
 				accumulated[i] += uint32(value)

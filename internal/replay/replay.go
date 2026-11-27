@@ -20,6 +20,38 @@ type Event struct {
 	Mask uint32
 }
 
+type ScoreSummary struct {
+	Count300  int
+	Count100  int
+	Count50   int
+	CountMAX  int
+	Count200  int
+	CountMiss int
+	Score     int
+	MaxCombo  int
+	Mods      int32
+}
+
+func (s ScoreSummary) Accuracy() float64 {
+	total := s.Count300 + s.Count100 + s.Count50 + s.CountMAX + s.Count200 + s.CountMiss
+	if total == 0 {
+		return 0
+	}
+
+	maxHitValue := 300
+	maxResultValue := 300
+	if uint32(s.Mods)&(1<<29) != 0 {
+		maxHitValue = 305
+		maxResultValue = 305
+	}
+	earned := maxHitValue*(s.Count300+s.CountMAX) +
+		200*s.Count200 + 100*s.Count100 + 50*s.Count50
+	if maxHitValue == 305 {
+		earned -= 5 * s.Count300
+	}
+	return float64(earned) / float64(total*maxResultValue) * 100
+}
+
 type keyChange struct {
 	time float64
 	lane int
@@ -27,31 +59,44 @@ type keyChange struct {
 }
 
 func Parse(path string, keys int) ([]Event, error) {
-	data, err := os.ReadFile(path)
+	parsed, err := ParseReplay(path, keys)
 	if err != nil {
 		return nil, err
+	}
+	return parsed.Events, nil
+}
+
+type ParsedReplay struct {
+	Events  []Event
+	Summary ScoreSummary
+}
+
+func ParseReplay(path string, keys int) (ParsedReplay, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ParsedReplay{}, err
 	}
 	r := bytes.NewReader(data)
 	mode, err := r.ReadByte()
 	if err != nil {
-		return nil, fmt.Errorf("read replay mode: %w", err)
+		return ParsedReplay{}, fmt.Errorf("read replay mode: %w", err)
 	}
 	if mode != 3 {
-		return nil, fmt.Errorf("replay mode is %d; expected mania (3)", mode)
+		return ParsedReplay{}, fmt.Errorf("replay mode is %d; expected mania (3)", mode)
 	}
 	var version int32
 	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
-		return nil, fmt.Errorf("read replay header: %w", err)
+		return ParsedReplay{}, fmt.Errorf("read replay header: %w", err)
 	}
 	for i := 0; i < 3; i++ {
 		if _, err := readString(r); err != nil {
-			return nil, fmt.Errorf("read replay metadata: %w", err)
+			return ParsedReplay{}, fmt.Errorf("read replay metadata: %w", err)
 		}
 	}
 	var counts [6]int16
 	for i := range counts {
 		if err := binary.Read(r, binary.LittleEndian, &counts[i]); err != nil {
-			return nil, fmt.Errorf("read replay score counts: %w", err)
+			return ParsedReplay{}, fmt.Errorf("read replay score counts: %w", err)
 		}
 	}
 	var score int32
@@ -60,44 +105,58 @@ func Parse(path string, keys int) ([]Event, error) {
 	var mods int32
 	if binary.Read(r, binary.LittleEndian, &score) != nil ||
 		binary.Read(r, binary.LittleEndian, &combo) != nil {
-		return nil, fmt.Errorf("truncated replay score header")
+		return ParsedReplay{}, fmt.Errorf("truncated replay score header")
 	}
-	_ = score
-	_ = combo
 	if perfect, err = r.ReadByte(); err != nil {
-		return nil, fmt.Errorf("read replay perfect flag: %w", err)
+		return ParsedReplay{}, fmt.Errorf("read replay perfect flag: %w", err)
 	}
 	_ = perfect
 	if err := binary.Read(r, binary.LittleEndian, &mods); err != nil {
-		return nil, fmt.Errorf("read replay mods: %w", err)
+		return ParsedReplay{}, fmt.Errorf("read replay mods: %w", err)
 	}
-	_ = mods
 	if _, err := readString(r); err != nil {
-		return nil, fmt.Errorf("read replay life bar: %w", err)
+		return ParsedReplay{}, fmt.Errorf("read replay life bar: %w", err)
 	}
 	var timestamp int64
 	var compressedLength int32
 	if binary.Read(r, binary.LittleEndian, &timestamp) != nil ||
 		binary.Read(r, binary.LittleEndian, &compressedLength) != nil {
-		return nil, fmt.Errorf("truncated replay data header")
+		return ParsedReplay{}, fmt.Errorf("truncated replay data header")
 	}
 	_ = timestamp
 	if compressedLength < 0 || int64(compressedLength) > int64(r.Len()) {
-		return nil, fmt.Errorf("invalid replay compressed length %d", compressedLength)
+		return ParsedReplay{}, fmt.Errorf("invalid replay compressed length %d", compressedLength)
 	}
 	compressed := make([]byte, compressedLength)
 	if _, err := io.ReadFull(r, compressed); err != nil {
-		return nil, fmt.Errorf("read compressed replay: %w", err)
+		return ParsedReplay{}, fmt.Errorf("read compressed replay: %w", err)
 	}
 	decoder, err := lzma.NewReader(bytes.NewReader(compressed))
 	if err != nil {
-		return nil, fmt.Errorf("initialize LZMA replay decoder: %w", err)
+		return ParsedReplay{}, fmt.Errorf("initialize LZMA replay decoder: %w", err)
 	}
 	eventsText, err := io.ReadAll(decoder)
 	if err != nil {
-		return nil, fmt.Errorf("decompress replay: %w", err)
+		return ParsedReplay{}, fmt.Errorf("decompress replay: %w", err)
 	}
-	return decodeEvents(string(eventsText), keys)
+	events, err := decodeEvents(string(eventsText), keys)
+	if err != nil {
+		return ParsedReplay{}, err
+	}
+	return ParsedReplay{
+		Events: events,
+		Summary: ScoreSummary{
+			Count300:  int(counts[0]),
+			Count100:  int(counts[1]),
+			Count50:   int(counts[2]),
+			CountMAX:  int(counts[3]),
+			Count200:  int(counts[4]),
+			CountMiss: int(counts[5]),
+			Score:     int(score),
+			MaxCombo:  int(combo),
+			Mods:      mods,
+		},
+	}, nil
 }
 
 func readString(r *bytes.Reader) (string, error) {
@@ -142,7 +201,7 @@ func decodeEvents(text string, keys int) ([]Event, error) {
 	var result []Event
 	var time float64
 	for _, row := range strings.Split(strings.TrimSpace(text), ",") {
-		if row == "" || strings.HasPrefix(row, "-") {
+		if row == "" {
 			continue
 		}
 		parts := strings.Split(row, "|")
@@ -153,6 +212,9 @@ func decodeEvents(text string, keys int) ([]Event, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid replay event time %q: %w", parts[0], err)
 		}
+		if delta == -12345 {
+			continue
+		}
 		mask64, err := strconv.ParseUint(parts[1], 10, 32)
 		if err != nil {
 			return nil, fmt.Errorf("invalid replay key mask %q: %w", parts[1], err)
@@ -161,6 +223,9 @@ func decodeEvents(text string, keys int) ([]Event, error) {
 		mask := uint32(mask64) & uint32((uint64(1)<<keys)-1)
 		result = append(result, Event{Time: time, Mask: mask})
 	}
+	sort.SliceStable(result, func(i, j int) bool {
+		return result[i].Time < result[j].Time
+	})
 	return result, nil
 }
 
