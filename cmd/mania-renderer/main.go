@@ -1,3 +1,5 @@
+//go:debug multipartmaxparts=20016
+
 package main
 
 import (
